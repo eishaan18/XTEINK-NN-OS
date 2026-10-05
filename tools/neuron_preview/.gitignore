@@ -1,0 +1,6 @@
+out/
+sd/
+out_preview
+stubs/I18n.h
+stubs/PreviewMetrics.h
+out_tests

@@ -1,6 +1,7 @@
 #include "TrustedTime.h"
 
 #include <Arduino.h>
+#include <HalClock.h>
 #include <Logging.h>
 #include <Preferences.h>
 #include <esp_sntp.h>
@@ -53,7 +54,10 @@ void writeFloor(const int64_t value) {
 }
 
 // SNTP sync callback (lwIP task context; Preferences/NVS is mutex-guarded).
-void onTimeSynced(struct timeval*) { note(); }
+void onTimeSynced(struct timeval*) {
+  halClock.noteSystemTimeSynced();
+  note();
+}
 
 void configureSntp() {
   // SNTP uses UTC epochs regardless of the display timezone. Copy TZ before

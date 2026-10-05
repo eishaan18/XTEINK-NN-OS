@@ -1,15 +1,79 @@
 #include "HalClock.h"
 
 #include <Logging.h>
+#include <Preferences.h>
 #include <WiFi.h>
 #include <esp_sntp.h>
 #include <time.h>
 
 HalClock halClock;  // Singleton instance
 
+namespace {
+// 2025-01-01T00:00:00Z: an earlier system time means it was never set.
+constexpr time_t MIN_VALID_EPOCH = 1735689600;
+constexpr const char* PREFS_NAMESPACE = "nnclock";
+constexpr const char* PREFS_SYNC = "sync";
+
+// UTC of the last NTP sync while the system clock has run continuously since
+// (0 = untrusted). Mirrored in NVS so deep sleep and restarts keep it. The
+// SNTP callback updates it from the lwIP task; 64-bit stores are not atomic
+// on the C3.
+int64_t lastSync = 0;
+portMUX_TYPE syncLock = portMUX_INITIALIZER_UNLOCKED;
+
+void storeLastSync(const int64_t value) {
+  Preferences prefs;
+  if (!prefs.begin(PREFS_NAMESPACE, /*readOnly=*/false)) return;
+  prefs.putLong64(PREFS_SYNC, value);
+  prefs.end();
+}
+}  // namespace
+
 void HalClock::begin() {
-  _available = _sdkRtc.begin();
-  LOG_INF("CLK", _available ? "SDK RTC found" : "RTC not found");
+  _hasRtc = _sdkRtc.begin();
+  _available = true;  // system clock fallback when there is no RTC chip
+  LOG_INF("CLK", _hasRtc ? "SDK RTC found" : "RTC not found, using system clock");
+
+  // Runs before TrustedTime restores its floor: the system clock still holds
+  // a real time only if it ran through the reset (deep sleep, soft restart).
+  // After a power loss it restarts near 1970 and the old sync no longer counts.
+  int64_t saved = 0;
+  {
+    Preferences prefs;
+    if (prefs.begin(PREFS_NAMESPACE, /*readOnly=*/true)) {
+      saved = prefs.getLong64(PREFS_SYNC, 0);
+      prefs.end();
+    }
+  }
+  if (saved > 0 && time(nullptr) < MIN_VALID_EPOCH) {
+    LOG_INF("CLK", "System clock reset since the last sync; time unknown until next sync");
+    saved = 0;
+    storeLastSync(0);
+  }
+  portENTER_CRITICAL(&syncLock);
+  lastSync = saved;
+  portEXIT_CRITICAL(&syncLock);
+}
+
+bool HalClock::timeValid() const {
+  struct tm t;
+  return localTime(t);
+}
+
+void HalClock::noteSystemTimeSynced() {
+  const time_t now = time(nullptr);
+  if (now < MIN_VALID_EPOCH) return;
+  portENTER_CRITICAL(&syncLock);
+  lastSync = static_cast<int64_t>(now);
+  portEXIT_CRITICAL(&syncLock);
+  storeLastSync(static_cast<int64_t>(now));
+}
+
+time_t HalClock::lastSyncUtc() const {
+  portENTER_CRITICAL(&syncLock);
+  const time_t last = static_cast<time_t>(lastSync);
+  portEXIT_CRITICAL(&syncLock);
+  return last;
 }
 
 namespace {
@@ -34,8 +98,17 @@ void HalClock::setTimezone(const char* posixTz) {
   _lastPollMs = 0;  // re-derive local time under the new rule immediately
 }
 
-bool HalClock::localTime(struct tm& out) const {
+bool HalClock::nowUtc(time_t& out) const {
   if (!_available) return false;
+  if (!_hasRtc) {
+    // Only trust the system clock once NTP has set it this power cycle: after
+    // a power loss TrustedTime restores a persisted floor, which is plausible
+    // but stale.
+    const time_t now = time(nullptr);
+    if (now < MIN_VALID_EPOCH || lastSyncUtc() == 0) return false;
+    out = now;
+    return true;
+  }
 
   const unsigned long now = millis();
   if (_lastPollMs == 0 || (now - _lastPollMs) >= CLOCK_POLL_MS) {
@@ -48,7 +121,21 @@ bool HalClock::localTime(struct tm& out) const {
     }
     _lastPollMs = now != 0 ? now : 1;  // 0 doubles as the invalidation sentinel
   }
-  localtime_r(&_cachedUtc, &out);
+  out = _cachedUtc;
+  return true;
+}
+
+bool HalClock::localTime(struct tm& out) const {
+  time_t now;
+  if (!nowUtc(now)) return false;
+  localtime_r(&now, &out);
+  return true;
+}
+
+bool HalClock::utcTime(struct tm& out) const {
+  time_t now;
+  if (!nowUtc(now)) return false;
+  gmtime_r(&now, &out);
   return true;
 }
 
@@ -92,10 +179,10 @@ bool HalClock::syncFromNTP() {
   if (tzBefore) snprintf(savedTz, sizeof(savedTz), "%s", tzBefore);
   configTzTime("UTC0", "pool.ntp.org", "time.nist.gov");
 
-  // Wait for SNTP sync to complete (up to 5 seconds)
-  constexpr int maxAttempts = 50;
+  // Wait for SNTP sync to complete (up to 8 seconds)
+  constexpr int maxAttempts = 80;
   for (int i = 0; i < maxAttempts; i++) {
-    if (sntp_get_sync_status() == SNTP_SYNC_STATUS_COMPLETED) {
+    if (sntp_get_sync_status() == SNTP_SYNC_STATUS_COMPLETED && time(nullptr) >= MIN_VALID_EPOCH) {
       time_t now = time(nullptr);
       struct tm timeinfo;
       gmtime_r(&now, &timeinfo);
@@ -108,12 +195,13 @@ bool HalClock::syncFromNTP() {
       dt.minute = static_cast<uint8_t>(timeinfo.tm_min);
       dt.second = static_cast<uint8_t>(timeinfo.tm_sec);
       dt.weekday = static_cast<uint8_t>(timeinfo.tm_wday);
-      const bool ok = _sdkRtc.set(dt);
-      if (ok) {
+      const bool ok = !_hasRtc || _sdkRtc.set(dt);
+      if (ok) noteSystemTimeSynced();
+      if (ok && _hasRtc) {
         _cachedUtc = epochFromUtc(dt);
         _hasCachedTime = true;
         _lastPollMs = 0;
-        LOG_INF("CLK", "RTC set to %04u-%02u-%02u %02u:%02u:%02u UTC", dt.year, dt.month, dt.day, dt.hour, dt.minute,
+        LOG_INF("CLK", "Clock set to %04u-%02u-%02u %02u:%02u:%02u UTC", dt.year, dt.month, dt.day, dt.hour, dt.minute,
                 dt.second);
       }
       setTimezone(savedTz);

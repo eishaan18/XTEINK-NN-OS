@@ -17,7 +17,7 @@
 class Activity;    // forward declaration
 class RenderLock;  // forward declaration
 
-enum class HomeMenuItem { NONE, FILE_BROWSER, LIBRARY, OPDS_BROWSER, FILE_TRANSFER, SETTINGS_MENU };
+enum class HomeMenuItem { NONE, FILE_BROWSER, LIBRARY, OPDS_BROWSER, FILE_TRANSFER, SETTINGS_MENU, BRIDGE };
 
 /**
  * ActivityManager
@@ -85,6 +85,8 @@ class ActivityManager {
   void goToJoinNetwork();  // File Transfer straight into Join Network (post heap-defrag reboot)
   void goToUsbDrive();
   void goToSettings();
+  void goToBridge();      // Nautical Neuron dashboard
+  void goToNeuronSync();  // Nautical Neuron WiFi sync
   void goToFileBrowser(std::string path = {});
   void goToLibrary();
   void goToBrowser();

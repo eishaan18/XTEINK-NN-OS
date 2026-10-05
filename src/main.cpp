@@ -145,7 +145,9 @@ constexpr uint32_t SILENT_REBOOT_TARGET_HOME = 0;
 constexpr uint32_t SILENT_REBOOT_TARGET_READER = 1;
 constexpr uint32_t SILENT_REBOOT_TARGET_SETTINGS = 2;
 constexpr uint32_t SILENT_REBOOT_TARGET_JOIN_NETWORK = 3;
-constexpr uint32_t SILENT_REBOOT_TARGET_MAX = SILENT_REBOOT_TARGET_JOIN_NETWORK;
+constexpr uint32_t SILENT_REBOOT_TARGET_BRIDGE = 4;
+constexpr uint32_t SILENT_REBOOT_TARGET_NEURON_SYNC = 5;
+constexpr uint32_t SILENT_REBOOT_TARGET_MAX = SILENT_REBOOT_TARGET_NEURON_SYNC;
 constexpr uint32_t SILENT_REBOOT_LIGHT_ON = 1U << 0;
 
 // How the device is coming back to life, resolved once at boot. Both resume
@@ -198,6 +200,21 @@ void silentRestart() { silentRestartTo(SILENT_REBOOT_TARGET_HOME, "home"); }
 void silentRestartToReader() { silentRestartTo(SILENT_REBOOT_TARGET_READER, "reader"); }
 
 void silentRestartToSettings() { silentRestartTo(SILENT_REBOOT_TARGET_SETTINGS, "settings"); }
+
+void silentRestartToBridge() { silentRestartTo(SILENT_REBOOT_TARGET_BRIDGE, "bridge"); }
+
+void silentRestartToNeuronSync() {
+  if (deepSleepInProgress) return;
+#if FREEINK_CAP_TOUCH
+  // Same rule as Join Network: touch boards proceed without the reboot.
+  if (BoardConfig::hasTouch()) return;
+#endif
+  armSilentReboot(SILENT_REBOOT_TARGET_NEURON_SYNC);
+  LOG_DBG("MAIN", "Silent restart (target=neuron-sync)");
+  GUI.drawPopup(renderer, tr(STR_LOADING_POPUP));
+  delay(50);
+  ESP.restart();
+}
 
 void silentRestartToJoinNetwork() {
   if (deepSleepInProgress) return;
@@ -630,6 +647,11 @@ void setup() {
     // Rebooted on the way *into* File Transfer > Join Network for a fresh heap;
     // resume that flow directly instead of landing on home.
     activityManager.goToJoinNetwork();
+  } else if (resume == BootResume::Silent && snapshotTarget == SILENT_REBOOT_TARGET_BRIDGE) {
+    activityManager.goToBridge();
+  } else if (resume == BootResume::Silent && snapshotTarget == SILENT_REBOOT_TARGET_NEURON_SYNC) {
+    // Rebooted on the way into a Neuron sync so WiFi + TLS get a pristine heap.
+    activityManager.goToNeuronSync();
   } else if (resume == BootResume::Silent && snapshotTarget == SILENT_REBOOT_TARGET_SETTINGS) {
     // Back out of the WiFi rows and the user is where they left off, not on Home.
     activityManager.goToSettings();
@@ -641,8 +663,10 @@ void setup() {
   } else if (APP_STATE.openEpubPath.empty() || !APP_STATE.lastSleepFromReader ||
              mappedInputManager.isPressed(MappedInputManager::Button::Back) || APP_STATE.readerActivityLoadCount > 0) {
     // Boot to home screen if no book is open, last sleep was not from reader, back button is held, or reader activity
-    // crashed (indicated by readerActivityLoadCount > 0)
-    activityManager.goHome(HomeMenuItem::NONE, needsWakeRefresh);
+    // crashed (indicated by readerActivityLoadCount > 0). Nautical Neuron lands
+    // on the Bridge dashboard; its Books tile leads to the library home.
+    (void)needsWakeRefresh;
+    activityManager.goToBridge();
   } else {
     // Clear app state to avoid getting into a boot loop if the epub doesn't load
     const auto path = APP_STATE.openEpubPath;

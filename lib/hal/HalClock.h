@@ -7,6 +7,10 @@ class HalClock;
 extern HalClock halClock;  // Singleton
 
 class HalClock {
+  // True when a battery-backed RTC chip answered. Without one (Xteink X4) the
+  // clock falls back to the ESP32 system clock, which survives deep sleep and
+  // soft restarts but must be set by NTP after a full power loss.
+  bool _hasRtc = false;
   bool _available = false;
   mutable Rtc _sdkRtc;
   // The RTC keeps UTC; local time comes from newlib's localtime_r under the
@@ -18,17 +22,34 @@ class HalClock {
 
   static constexpr unsigned long CLOCK_POLL_MS = 10000;  // 10 seconds
 
+  // Current UTC epoch from the RTC (cached) or the trusted system clock.
+  bool nowUtc(time_t& out) const;
+
  public:
   // Call after BoardConfig has selected the active device.
   void begin();
 
-  // True if an RTC is present on this device
+  // True when the clock features can be offered: an RTC chip, or the system
+  // clock fallback on boards without one.
   bool isAvailable() const { return _available; }
+  // True only when a hardware RTC chip is present.
+  bool hasRtc() const { return _hasRtc; }
+  // True when localTime() currently has a trustworthy time to report.
+  bool timeValid() const;
+  // UTC epoch of the last NTP sync the system clock has kept running since
+  // (0 = none). Persisted in NVS; cleared when a power loss resets the clock.
+  time_t lastSyncUtc() const;
+  // Record that SNTP just set the system clock (any sync path, incl. the
+  // background TrustedTime sync).
+  void noteSystemTimeSynced();
 
   // Set the POSIX TZ rule (e.g. "CET-1CEST,M3.5.0,M10.5.0/3") applied to every
   // read. nullptr/empty falls back to UTC. Drops the read cache so the change
   // shows immediately.
   void setTimezone(const char* posixTz);
+
+  // Current UTC (GMT) time. Returns false when the time is not known.
+  bool utcTime(struct tm& out) const;
 
   // Current wall-clock time in the configured timezone.
   // Returns false if RTC is not available.

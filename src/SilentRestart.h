@@ -10,6 +10,11 @@
 void silentRestart();            // home screen
 void silentRestartToReader();    // currently-open EPUB (APP_STATE.openEpubPath)
 void silentRestartToSettings();  // settings screen
+void silentRestartToBridge();    // Nautical Neuron dashboard
+// Reboot into the Neuron sync screen on a fresh heap (WiFi + TLS need large
+// contiguous blocks). Returns without rebooting on touch boards; the caller
+// then opens the sync screen directly.
+void silentRestartToNeuronSync();
 // Reboot into the File Transfer > Join Network flow on a pristine heap, so the
 // WiFi + TLS working set has the contiguous RAM it needs on tight boards. A
 // no-op on touch boards (a soft reset would cycle their externally-powered
